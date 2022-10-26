@@ -4,12 +4,17 @@ use eframe::egui::{
     CentralPanel, SidePanel, TopBottomPanel, Slider,
 };
 
-const DRIVE_STRENGTH: f64 = 1.073; // gamma
+use std::collections::VecDeque;
+
+const DRIVE_STRENGTH: f64 = 1.5; // gamma
 const DRIVING_FORCE_FREQ: f64 = 2.0 * core::f64::consts::PI; // omega
 const NATURAL_FREQ: f64 = 1.5 * DRIVING_FORCE_FREQ; // omega_0
 const DAMPING_COEFF: f64 = NATURAL_FREQ / 4.0; // beta
 
 const LENGTH: f64 = 1.0;
+
+const PHI_0: f64 = -core::f64::consts::FRAC_PI_2;
+const EPSILON: f64 = 0.1;
 
 #[derive(Default, Clone, Copy)]
 struct Params {
@@ -35,6 +40,8 @@ struct Application {
     time: f64,
 
     show_pendulum: [bool; 3],
+    show_diff: [bool; 3],
+    show_log_diff: [bool; 3],
     steps_per_second: usize,
     dt: f64,
 }
@@ -90,6 +97,7 @@ fn main() -> anyhow::Result<()> {
         initial_window_size: Some(egui::Vec2::new(800.0, 600.0)),
         ..Default::default()
     };
+
     let app = Application {
         state: [(
             State {
@@ -104,7 +112,7 @@ fn main() -> anyhow::Result<()> {
             },
         ), (
             State {
-                phi: -core::f64::consts::FRAC_PI_2,
+                phi: PHI_0,
                 phidot: 0.,
             },
             Params {
@@ -115,7 +123,7 @@ fn main() -> anyhow::Result<()> {
             },
         ), (
             State {
-                phi: core::f64::consts::FRAC_PI_2,
+                phi: PHI_0 + EPSILON,
                 phidot: 0.,
             },
             Params {
@@ -125,9 +133,11 @@ fn main() -> anyhow::Result<()> {
                 damping_coeff: DAMPING_COEFF,
             },
         )],
-        show_pendulum: [true; 3],
-        steps_per_second: 1000,
-        dt: 1.0 / 60000.0,
+        show_pendulum: [false; 3],
+        show_diff: [false; 3],
+        show_log_diff: [false; 3],
+        steps_per_second: 5000,
+        dt: 1.0 / 600000.0,
         ..Default::default()
     };
 
@@ -140,11 +150,22 @@ fn main() -> anyhow::Result<()> {
 
 impl eframe::App for Application {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.set_visuals(egui::Visuals::dark());
+
         SidePanel::left("Options").resizable(true).show(ctx, |ui| {
             ui.heading("Options");
             for (i, show) in self.show_pendulum.iter_mut().enumerate() {
                 ui.checkbox(show, format!("Show {}", i));
             }
+
+            for (i, show) in self.show_diff.iter_mut().enumerate() {
+                ui.checkbox(show, format!("Show diff between {} and {}", i, (i + 1) % 3));
+            }
+
+            for (i, show) in self.show_log_diff.iter_mut().enumerate() {
+                ui.checkbox(show, format!("Show log diff between {} and {}", i, (i + 1) % 3));
+            }
+            
 
             ui.add(Slider::new(&mut self.steps_per_second, 0..=100000).text("Steps per second").logarithmic(true));
             ui.add(Slider::new(&mut self.dt, 1e-5..=1e-1).text("Time Step").logarithmic(true));
@@ -163,6 +184,38 @@ impl eframe::App for Application {
                             history.iter().map(|(t, s)| [*t, s.phi]),
                         )));
                     }
+
+                    for (i, enabled) in self.show_diff.iter().enumerate() {
+                        if !enabled {
+                            continue;
+                        }
+
+                        let history = &self.history[i];
+                        let history2 = &self.history[(i + 1) % 3];
+                        plot_ui.line(Line::new(PlotPoints::from_iter(
+                            history.iter().zip(history2.iter()).map(|((t, s), (_, s2))| [*t, s2.phi - s.phi]),
+                        )));
+                    }
+
+                    for (i, enabled) in self.show_log_diff.iter().enumerate() {
+                        if !enabled {
+                            continue;
+                        }
+
+                        let history = &self.history[i];
+                        let history2 = &self.history[(i + 1) % 3];
+                        plot_ui.line(Line::new(PlotPoints::from_iter(
+                            history.iter().zip(history2.iter()).map(|((t, s), (_, s2))| [*t, {
+                                let logdiff = (s2.phi - s.phi).abs().log10();
+
+                                if !logdiff.is_finite() {
+                                    0.
+                                } else {
+                                    logdiff
+                                }
+                            }]),
+                        )));
+                    }
                 });
             });
 
@@ -170,15 +223,17 @@ impl eframe::App for Application {
             Plot::new("Duffing Pendulum")
                 .data_aspect(1.0)
                 .show(ui, |plot_ui| {
-                    for _ in 0..self.steps_per_second {
-                        self.update(self.dt);
-                    }
+                    if self.steps_per_second > 0 {
+                        for _ in 0..self.steps_per_second {
+                            self.update(self.dt);
+                        }
 
-                    for ((state, _), history) in self.state.iter_mut().zip(self.history.iter_mut()) {
-                        history.push_back((self.time, *state));
-                        // if history.len() > 10000 {
-                        //     history.remove(0);
-                        // }
+                        for ((state, _), history) in self.state.iter_mut().zip(self.history.iter_mut()) {
+                            history.push_back((self.time, *state));
+                            // if history.len() > 10000 {
+                            //     history.remove(0);
+                            // }
+                        }
                     }
 
                     let polygons = self.polygonize();
@@ -210,10 +265,7 @@ impl eframe::App for Application {
 
 /********* MATH IMPLEMENTATION *********/
 
-use std::{
-    collections::VecDeque,
-    ops::{Add, AddAssign, Mul, MulAssign},
-};
+use std::ops::{Add, AddAssign, Mul, MulAssign};
 
 impl Add for State {
     type Output = Self;
