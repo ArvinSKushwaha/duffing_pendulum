@@ -4,10 +4,10 @@ use eframe::egui::{
     CentralPanel, SidePanel, TopBottomPanel, Slider,
 };
 
-const DRIVE_STRENGTH: f64 = 1.15; // gamma
-const DRIVING_FORCE_FREQ: f64 = 0.667; // omega
-const NATURAL_FREQ: f64 = 1.0; // omega_0
-const DAMPING_COEFF: f64 = 0.5; // beta
+const DRIVE_STRENGTH: f64 = 1.073; // gamma
+const DRIVING_FORCE_FREQ: f64 = 2.0 * core::f64::consts::PI; // omega
+const NATURAL_FREQ: f64 = 1.5 * DRIVING_FORCE_FREQ; // omega_0
+const DAMPING_COEFF: f64 = NATURAL_FREQ / 4.0; // beta
 
 const LENGTH: f64 = 1.0;
 
@@ -40,36 +40,45 @@ struct Application {
 }
 
 impl Application {
+    fn diff(state: State, params: Params, time: f64) -> State {
+        let State { phi, phidot } = state;
+        let Params {
+            drive_strength,
+            driving_force_freq,
+            natural_freq,
+            damping_coeff,
+        } = params;
+        let cos_omega_t = (driving_force_freq * time).cos();
+        let sin_phi = phi.sin();
+        let phiddot = drive_strength * natural_freq.powi(2) * cos_omega_t
+            - 2.0 * damping_coeff * phidot
+            - natural_freq.powi(2) * sin_phi;
+        State {
+            phi: phidot,
+            phidot: phiddot,
+        }
+    }
+
     fn update(&mut self, dt: f64) {
         for (state, params) in self.state.iter_mut() {
-            let cos_omega_t = (params.driving_force_freq * self.time).cos();
-            let sin_phi = state.phi.sin();
+            let params = *params;
 
-            let phiddot = params.drive_strength * params.natural_freq.powi(2) * cos_omega_t
-                - 2.0 * params.damping_coeff * state.phidot
-                - params.natural_freq.powi(2) * sin_phi;
-
-            state.phi += state.phidot * dt + 0.5 * phiddot * dt.powi(2);
-
-            let new_phiddot = params.drive_strength * params.natural_freq.powi(2) * cos_omega_t
-                - 2.0 * params.damping_coeff * state.phidot
-                - params.natural_freq.powi(2) * sin_phi;
-
-            state.phidot += (phiddot + new_phiddot) / 2.0 * dt;
+            let k1 = Self::diff(*state, params, self.time);
+            let k2 = Self::diff(*state + k1 * (dt / 2.0), params, self.time + dt / 2.0);
+            let k3 = Self::diff(*state + k2 * (dt / 2.0), params, self.time + dt / 2.0);
+            let k4 = Self::diff(*state + k3 * dt, params, self.time + dt);
+            *state += (k1 + k2 * 2.0 + k3 * 2.0 + k4) * (dt / 6.0);
         }
         self.time += dt;
     }
 
     fn polygonize(&self) -> Vec<Polygon> {
-        const WIDTH: f64 = 0.01;
         self.state
             .iter()
             .map(|(state, _)| {
                 Polygon::new(vec![
-                    [WIDTH / 2.0 * state.phi.cos(), WIDTH / 2.0 * state.phi.sin()],
-                    [LENGTH * state.phi.sin() + WIDTH / 2.0 * state.phi.cos(), -LENGTH * state.phi.cos() + WIDTH / 2.0 * state.phi.sin()],
-                    [LENGTH * state.phi.sin() - WIDTH / 2.0 * state.phi.cos(), -LENGTH * state.phi.cos() - WIDTH / 2.0 * state.phi.sin()],
-                    [-WIDTH / 2.0 * state.phi.cos(), -WIDTH / 2.0 * state.phi.sin()],
+                    [0.0, 0.0],
+                    [LENGTH * state.phi.sin(), -LENGTH * state.phi.cos()],
                 ])
             })
             .collect()
@@ -82,47 +91,43 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let app = Application {
-        state: [
-            (
-                State {
-                    phi: 0.,
-                    phidot: 0.1,
-                },
-                Params {
-                    drive_strength: DRIVE_STRENGTH,
-                    driving_force_freq: DRIVING_FORCE_FREQ,
-                    natural_freq: NATURAL_FREQ,
-                    damping_coeff: DAMPING_COEFF,
-                },
-            ),
-            (
-                State {
-                    phi: 0.5e-3,
-                    phidot: 0.1,
-                },
-                Params {
-                    drive_strength: DRIVE_STRENGTH + 0.01,
-                    driving_force_freq: DRIVING_FORCE_FREQ + 0.01,
-                    natural_freq: NATURAL_FREQ + 0.01,
-                    damping_coeff: DAMPING_COEFF + 0.01,
-                },
-            ),
-            (
-                State {
-                    phi: 1e-3,
-                    phidot: 0.1,
-                },
-                Params {
-                    drive_strength: DRIVE_STRENGTH + 0.02,
-                    driving_force_freq: DRIVING_FORCE_FREQ + 0.02,
-                    natural_freq: NATURAL_FREQ + 0.02,
-                    damping_coeff: DAMPING_COEFF + 0.02,
-                },
-            ),
-        ],
+        state: [(
+            State {
+                phi: 0.,
+                phidot: 0.,
+            },
+            Params {
+                drive_strength: DRIVE_STRENGTH,
+                driving_force_freq: DRIVING_FORCE_FREQ,
+                natural_freq: NATURAL_FREQ,
+                damping_coeff: DAMPING_COEFF,
+            },
+        ), (
+            State {
+                phi: -core::f64::consts::FRAC_PI_2,
+                phidot: 0.,
+            },
+            Params {
+                drive_strength: DRIVE_STRENGTH,
+                driving_force_freq: DRIVING_FORCE_FREQ,
+                natural_freq: NATURAL_FREQ,
+                damping_coeff: DAMPING_COEFF,
+            },
+        ), (
+            State {
+                phi: core::f64::consts::FRAC_PI_2,
+                phidot: 0.,
+            },
+            Params {
+                drive_strength: DRIVE_STRENGTH,
+                driving_force_freq: DRIVING_FORCE_FREQ,
+                natural_freq: NATURAL_FREQ,
+                damping_coeff: DAMPING_COEFF,
+            },
+        )],
         show_pendulum: [true; 3],
-        steps_per_second: 100000,
-        dt: 1.0 / 6000000.0,
+        steps_per_second: 1000,
+        dt: 1.0 / 60000.0,
         ..Default::default()
     };
 
@@ -141,8 +146,8 @@ impl eframe::App for Application {
                 ui.checkbox(show, format!("Show {}", i));
             }
 
-            ui.add(Slider::new(&mut self.steps_per_second, 1..=1000000).text("Steps per second").logarithmic(true));
-            ui.add(Slider::new(&mut self.dt, 1e-6..=1e-1).text("Time Step").logarithmic(true));
+            ui.add(Slider::new(&mut self.steps_per_second, 0..=100000).text("Steps per second").logarithmic(true));
+            ui.add(Slider::new(&mut self.dt, 1e-5..=1e-1).text("Time Step").logarithmic(true));
         });
 
         TopBottomPanel::bottom("Base")
